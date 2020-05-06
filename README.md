@@ -1,6 +1,8 @@
-# EntityX - A fast, type-safe C++ Entity Component System [![Build Status](https://travis-ci.org/alecthomas/entityx.png)](https://travis-ci.org/alecthomas/entityx)
+# EntityX - A fast, type-safe C++ Entity Component System
+[![Build Status](https://travis-ci.org/alecthomas/entityx.png)](https://travis-ci.org/alecthomas/entityx) [![Build status](https://ci.appveyor.com/api/projects/status/qc8s0pqb5ci092iv/branch/master)](https://ci.appveyor.com/project/alecthomas/entityx/branch/master) [![Gitter chat](https://badges.gitter.im/alecthomas.png)](https://gitter.im/alecthomas/Lobby)
 
-***NOTE: The current stable release 1.0.0 breaks backwards compataibility with < 1.0.0. See the [change log](CHANGES.md) for details.***
+
+***NOTE: The current stable release 1.0.0 breaks backward compatibility with < 1.0.0. See the [change log](CHANGES.md) for details.***
 
 Entity Component Systems (ECS) are a form of decomposition that completely decouples entity logic and data from the entity "objects" themselves. The [Evolve your Hierarchy](http://cowboyprogramming.com/2007/01/05/evolve-your-heirachy/) article provides a solid overview of EC systems and why you should use them.
 
@@ -20,9 +22,13 @@ See [below](#installation) for installation instructions.
 
 ## Contact
 
-EntityX now has a mailing list! Send a mail to [entityx@librelist.com](mailto:entityx@librelist.com) to subscribe. Instructions will follow.
+Feel free to jump on my [Gitter channel](https://gitter.im/alecthomas/Lobby) if you have any questions/comments. This is a single channel for all of my projects, so please mention you're asking about EntityX to avoid (my) confusion.
 
 You can also contact me directly via [email](mailto:alec@swapoff.org) or [Twitter](https://twitter.com/alecthomas).
+
+## Benchmarks / Comparisons
+
+EntityX includes its own benchmarks, but @abeimler has created [a benchmark suite](https://github.com/abeimler/ecs_benchmark/blob/master/doc/BenchmarkResultDetails2.md) testing up to 2M entities in EntityX, the EntityX compile-time branch, Anax, and Artemis C++.
 
 ## Recent Notable Changes
 
@@ -87,9 +93,9 @@ Creating an entity is as simple as:
 ```c++
 #include <entityx/entityx.h>
 
-EntityX entityx;
+entityx::EntityX ex;
 
-entityx::Entity entity = entityx.entities.create();
+entityx::Entity entity = ex.entities.create();
 ```
 
 And destroying an entity is done with:
@@ -142,7 +148,22 @@ entity.assign<Position>(1.0f, 2.0f);
 
 #### Querying entities and their components
 
-To query all entities with a set of components assigned, use ``entityx::EntityManager::entities_with_components()``. This method will return only those entities that have *all* of the specified components associated with them, assigning each component pointer to the corresponding component instance:
+To query all entities with a set of components assigned you can use two
+methods. Both methods will return only those entities that have *all* of the
+specified components associated with them.
+
+`entityx::EntityManager::each(f)` provides functional-style iteration over
+entity components:
+
+```c++
+entities.each<Position, Direction>([](Entity entity, Position &position, Direction &direction) {
+  // Do things with entity, position and direction.
+});
+```
+
+
+For iterator-style traversal of components, use
+``entityx::EntityManager::entities_with_components()``:
 
 ```c++
 ComponentHandle<Position> position;
@@ -188,12 +209,10 @@ A basic movement system might be implemented with something like the following:
 ```c++
 struct MovementSystem : public System<MovementSystem> {
   void update(entityx::EntityManager &es, entityx::EventManager &events, TimeDelta dt) override {
-    ComponentHandle<Position> position;
-    ComponentHandle<Direction> direction;
-    for (Entity entity : es.entities_with_components(position, direction)) {
-      position->x += direction->x * dt;
-      position->y += direction->y * dt;
-    }
+    es.each<Position, Direction>([dt](Entity entity, Position &position, Direction &direction) {
+      position.x += direction.x * dt;
+      position.y += direction.y * dt;
+    });
   };
 };
 ```
@@ -242,7 +261,7 @@ class CollisionSystem : public System<CollisionSystem> {
 Objects interested in receiving collision information can subscribe to ``Collision`` events by first subclassing the CRTP class ``Receiver<T>``:
 
 ```c++
-struct DebugSystem : public System<DebugSystem>, Receiver<DebugSystem> {
+struct DebugSystem : public System<DebugSystem>, public Receiver<DebugSystem> {
   void configure(entityx::EventManager &event_manager) {
     event_manager.subscribe<Collision>(*this);
   }
@@ -276,6 +295,7 @@ Several events are emitted by EntityX itself:
 - Event objects are destroyed after delivery, so references should not be retained.
 - A single class can receive any number of types of events by implementing a ``receive(const EventType &)`` method for each event type.
 - Any class implementing `Receiver` can receive events, but typical usage is to make `System`s also be `Receiver`s.
+- When an `Entity` is destroyed it will cause all of its components to be removed. This triggers `ComponentRemovedEvent`s to be triggered for each of its components. These events are triggered before the `EntityDestroyedEvent`.
 
 ### Manager (tying it all together)
 
@@ -324,27 +344,47 @@ while (true) {
 
 ## Installation
 
-EntityX has the following build and runtime requirements:
+### Arch Linux
 
-- A C++ compiler that supports a basic set of C++11 features (ie. Clang >= 3.1, GCC >= 4.7, and Visual C++.
-- For Visual C++ support you will need at least [Visual Studio 2013](http://www.microsoft.com/en-ca/download/details.aspx?id=40787) with [Update 1](http://www.microsoft.com/en-us/download/details.aspx?id=41650) and [Update 2 CTP](http://www.microsoft.com/en-us/download/details.aspx?id=41699) installed.
-- [CMake](http://cmake.org/)
+    pacman -S entityx
+
+### OSX
+
+    brew install entityx
+
+### Windows
+
+Build it manually.
+
+Requirements:
+
+* [Visual Studio 2015](https://www.visualstudio.com/en-us/downloads/visual-studio-2015-downloads-vs.aspx) or later, or a C++ compiler that supports a basic set of C++11 features (ie. Clang >= 3.1 or GCC >= 4.7).
+* [CMake](http://cmake.org/)
+
+### Building entityx - Using vcpkg
+
+You can download and install entityx using the [vcpkg](https://github.com/Microsoft/vcpkg) dependency manager:
+
+    git clone https://github.com/Microsoft/vcpkg.git
+    cd vcpkg
+    ./bootstrap-vcpkg.sh
+    ./vcpkg integrate install
+    ./vcpkg install entityx
+
+The entityx port in vcpkg is kept up to date by Microsoft team members and community contributors. If the version is out of date, please [create an issue or pull request](https://github.com/Microsoft/vcpkg) on the vcpkg repository.
+
+### Other systems
+
+Build it manually.
+
+Requirements:
+
+* A C++ compiler that supports a basic set of C++11 features (ie. Clang >= 3.1, GCC >= 4.7).
+* [CMake](http://cmake.org/)
 
 ### C++11 compiler and library support
 
 C++11 support is quite...raw. To make life more interesting, C++ support really means two things: language features supported by the compiler, and library features. EntityX tries to support the most common options, including the default C++ library for the compiler/platform, and libstdc++.
-
-### Installing on OSX Mountain Lion
-
-On OSX you must use Clang as the GCC version is practically prehistoric.
-
-I use Homebrew, and the following works for me:
-
-For libstdc++:
-
-```bash
-cmake -DENTITYX_BUILD_SHARED=0 -DENTITYX_BUILD_TESTING=1 ..
-```
 
 ### Installing on Ubuntu 12.04
 
@@ -355,7 +395,7 @@ For gcc-4.7:
 ```bash
 sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
 sudo apt-get update -qq
-sudo apt-get install gcc-4.7 g++4.7
+sudo apt-get install gcc-4.7 g++-4.7
 CC=gcc-4.7 CXX=g++4.7 cmake ...
 ```
 
@@ -388,4 +428,4 @@ make
 make install
 ```
 
-EntityX has currently only been tested on Mac OSX (Lion and Mountain Lion), and Linux Debian 12.04. Reports and patches for builds on other platforms are welcome.
+EntityX has currently only been tested on Mac OSX (Lion and Mountain Lion), Linux Debian 12.04 and Arch Linux. Reports and patches for builds on other platforms are welcome.

@@ -290,7 +290,7 @@ TEST_CASE_METHOD(EntityManagerFixture, "TestUnpack") {
 // }
 
 TEST_CASE_METHOD(EntityManagerFixture, "TestComponentIdsDiffer") {
-  REQUIRE(Component<Position>::family() !=  Component<Direction>::family());
+  REQUIRE(EntityManager::component_family<Position>() !=  EntityManager::component_family<Direction>());
 }
 
 TEST_CASE_METHOD(EntityManagerFixture, "TestEntityCreatedEvent") {
@@ -405,6 +405,27 @@ TEST_CASE_METHOD(EntityManagerFixture, "TestComponentRemovedEvent") {
   REQUIRE(!(e.component<Direction>()));
 }
 
+TEST_CASE_METHOD(EntityManagerFixture, "TestComponentRemovedEventOnEntityDestroyed") {
+  struct ComponentRemovedReceiver : public Receiver<ComponentRemovedReceiver> {
+    void receive(const ComponentRemovedEvent<Direction> &event) {
+      removed = true;
+    }
+
+    bool removed = false;
+  };
+
+  ComponentRemovedReceiver receiver;
+  ev.subscribe<ComponentRemovedEvent<Direction>>(receiver);
+
+  REQUIRE(!(receiver.removed));
+
+  Entity e = em.create();
+  e.assign<Direction>(1.0, 2.0);
+  e.destroy();
+
+  REQUIRE(receiver.removed);
+}
+
 TEST_CASE_METHOD(EntityManagerFixture, "TestEntityAssignment") {
   Entity a, b;
   a = em.create();
@@ -480,6 +501,25 @@ TEST_CASE_METHOD(EntityManagerFixture, "TestComponentAssignmentFromCopy") {
   REQUIRE(!copy);
 }
 
+TEST_CASE_METHOD(EntityManagerFixture, "TestEntityCreateFromCopy") {
+  Entity a = em.create();
+  a.assign<CopyVerifier>();
+  ComponentHandle<CopyVerifier> original = a.component<CopyVerifier>();
+  ComponentHandle<Position> aPosition = a.assign<Position>(1, 2);
+  Entity b = em.create_from_copy(a);
+  ComponentHandle<CopyVerifier> copy = b.component<CopyVerifier>();
+  ComponentHandle<Position> bPosition = b.component<Position>();
+  REQUIRE(original);
+  REQUIRE(original->copied == false);
+  REQUIRE(copy);
+  REQUIRE(copy->copied == 1);
+  REQUIRE(aPosition->x == bPosition->x);
+  REQUIRE(aPosition->y == bPosition->y);
+  REQUIRE(aPosition.get() != bPosition.get());
+  REQUIRE(a.component_mask() == b.component_mask());
+  REQUIRE(a != b);
+}
+
 TEST_CASE_METHOD(EntityManagerFixture, "TestComponentHandleInvalidatedWhenComponentDestroyed") {
   Entity a = em.create();
   ComponentHandle<Position> position = a.assign<Position>(1, 2);
@@ -542,7 +582,7 @@ TEST_CASE("TestComponentDestructorCalledWhenManagerDestroyed") {
   };
 
   struct Test : Component<Test> {
-    Test(bool &yes) : freed(yes) {}
+    explicit Test(bool &yes) : freed(yes) {}
 
     Freed freed;
   };
@@ -565,7 +605,7 @@ TEST_CASE("TestComponentDestructorCalledWhenEntityDestroyed") {
   };
 
   struct Test : Component<Test> {
-    Test(bool &yes) : freed(yes) {}
+    explicit Test(bool &yes) : freed(yes) {}
 
     Freed freed;
   };
@@ -577,4 +617,64 @@ TEST_CASE("TestComponentDestructorCalledWhenEntityDestroyed") {
   REQUIRE(freed == false);
   test.destroy();
   REQUIRE(freed == true);
+}
+
+TEST_CASE_METHOD(EntityManagerFixture, "TestComponentsRemovedFromReusedEntities") {
+  Entity a = em.create();
+  Entity::Id aid = a.id();
+  a.assign<Position>(1, 2);
+  a.destroy();
+
+  Entity b = em.create();
+  Entity::Id bid = b.id();
+
+  REQUIRE(aid.index() == bid.index());
+  REQUIRE(!b.has_component<Position>());
+  b.assign<Position>(3, 4);
+}
+
+TEST_CASE_METHOD(EntityManagerFixture, "TestConstComponentsNotInstantiatedTwice") {
+  Entity a = em.create();
+  a.assign<Position>(1, 2);
+
+  const Entity b = a;
+
+  REQUIRE(a.component<Position>().valid());
+  REQUIRE(b.component<const Position>().valid());
+  REQUIRE(b.component<const Position>()->x == 1);
+  REQUIRE(b.component<const Position>()->y == 2);
+}
+
+TEST_CASE_METHOD(EntityManagerFixture, "TestEntityManagerEach") {
+  Entity a = em.create();
+  a.assign<Position>(1, 2);
+  int count = 0;
+  em.each<Position>([&count](Entity entity, Position &position) {
+    count++;
+    REQUIRE(position.x == 1);
+    REQUIRE(position.y == 2);
+  });
+  REQUIRE(count == 1);
+}
+
+TEST_CASE_METHOD(EntityManagerFixture, "TestViewEach") {
+  Entity a = em.create();
+  a.assign<Position>(1, 2);
+  int count = 0;
+  em.entities_with_components<Position>().each([&count](Entity entity, Position &position) {
+    count++;
+    REQUIRE(position.x == 1);
+    REQUIRE(position.y == 2);
+  });
+  REQUIRE(count == 1);
+}
+
+TEST_CASE_METHOD(EntityManagerFixture, "TestComponentDereference") {
+  Entity a = em.create();
+  a.assign<Position>(10, 5);
+  auto& positionRef = *a.component<Position>();
+  REQUIRE(positionRef.x == 10);
+  REQUIRE(positionRef.y == 5);
+  positionRef.y = 20;
+  REQUIRE(a.component<Position>()->y == 20);
 }

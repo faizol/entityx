@@ -26,6 +26,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <type_traits>
+ #include <functional>
 
 #include "entityx/help/Pool.h"
 #include "entityx/config.h"
@@ -40,8 +42,10 @@ typedef std::uint64_t uint64_t;
 class EntityManager;
 
 
-template <typename C>
+template <typename C, typename EM = EntityManager>
 class ComponentHandle;
+
+
 
 /** A convenience handle around an Entity::Id.
  *
@@ -136,17 +140,17 @@ public:
   template <typename C>
   void remove();
 
-  template <typename C>
+  template <typename C, typename = typename std::enable_if<!std::is_const<C>::value>::type>
   ComponentHandle<C> component();
 
-  template <typename C>
-  const ComponentHandle<const C> component() const;
+  template <typename C, typename = typename std::enable_if<std::is_const<C>::value>::type>
+  const ComponentHandle<C, const EntityManager> component() const;
 
   template <typename ... Components>
   std::tuple<ComponentHandle<Components>...> components();
 
   template <typename ... Components>
-  std::tuple<ComponentHandle<const Components>...> components() const;
+  std::tuple<ComponentHandle<const Components, const EntityManager>...> components() const;
 
   template <typename C>
   bool has_component() const;
@@ -176,7 +180,7 @@ public:
  * - If a component is removed from its host entity.
  * - If its host entity is destroyed.
  */
-template <typename C>
+template <typename C, typename EM>
 class ComponentHandle {
 public:
   typedef C ComponentType;
@@ -189,6 +193,9 @@ public:
   C *operator -> ();
   const C *operator -> () const;
 
+  C &operator * ();
+  const C &operator * () const;
+
   C *get();
   const C *get() const;
 
@@ -196,6 +203,11 @@ public:
    * Remove the component from its entity and destroy it.
    */
   void remove();
+
+  /**
+   * Returns the Entity associated with the component
+   */
+  Entity entity();
 
   bool operator == (const ComponentHandle<C> &other) const {
     return manager_ == other.manager_ && id_ == other.id_;
@@ -208,12 +220,10 @@ public:
 private:
   friend class EntityManager;
 
-  ComponentHandle(EntityManager *manager, Entity::Id id) :
+  ComponentHandle(EM *manager, Entity::Id id) :
       manager_(manager), id_(id) {}
-  ComponentHandle(const EntityManager *manager, Entity::Id id) :
-      manager_(const_cast<EntityManager*>(manager)), id_(id) {}
 
-  EntityManager *manager_;
+  EM *manager_;
   Entity::Id id_;
 };
 
@@ -268,7 +278,10 @@ template <typename Derived>
 struct Component : public BaseComponent {
  public:
   typedef ComponentHandle<Derived> Handle;
+  typedef ComponentHandle<const Derived, const EntityManager> ConstHandle;
 
+private:
+  friend class EntityManager;
   /// Used internally for registration.
   static Family family();
 };
@@ -320,6 +333,26 @@ struct ComponentRemovedEvent : public Event<ComponentRemovedEvent<C>> {
   ComponentHandle<C> component;
 };
 
+/**
+ * Helper class to perform component operations in a typed manner.
+ */
+class BaseComponentHelper {
+public:
+  virtual ~BaseComponentHelper() {}
+  virtual void remove_component(Entity e) = 0;
+  virtual void copy_component_to(Entity source, Entity target) = 0;
+};
+
+template <typename C>
+class ComponentHelper : public BaseComponentHelper {
+public:
+  void remove_component(Entity e) override {
+    e.remove<C>();
+  }
+  void copy_component_to(Entity source, Entity target) override {
+    target.assign_from_copy<C>(*(source.component<C>().get()));
+  }
+};
 
 /**
  * Manages Entity::Id creation and component assignment.
@@ -407,7 +440,6 @@ class EntityManager : entityx::help::NonCopyable {
       void next_entity(Entity &entity) {}
     };
 
-
     Iterator begin() { return Iterator(manager_, mask_, 0); }
     Iterator end() { return Iterator(manager_, mask_, uint32_t(manager_->capacity())); }
     const Iterator begin() const { return Iterator(manager_, mask_, 0); }
@@ -416,7 +448,7 @@ class EntityManager : entityx::help::NonCopyable {
   private:
     friend class EntityManager;
 
-    BaseView(EntityManager *manager) : manager_(manager) { mask_.set(); }
+    explicit BaseView(EntityManager *manager) : manager_(manager) { mask_.set(); }
     BaseView(EntityManager *manager, ComponentMask mask) :
         manager_(manager), mask_(mask) {}
 
@@ -424,19 +456,37 @@ class EntityManager : entityx::help::NonCopyable {
     ComponentMask mask_;
   };
 
-  typedef BaseView<false> View;
+  template <bool All, typename ... Components>
+  class TypedView: public BaseView<All> {
+  public:
+    template <typename T> struct identity { typedef T type; };
+
+    void each(typename identity<std::function<void(Entity entity, Components&...)>>::type f) {
+      for (auto it : *this)
+        f(it, *(it.template component<Components>().get())...);
+    }
+
+  private:
+    friend class EntityManager;
+
+    explicit TypedView(EntityManager *manager) : BaseView<All>(manager) {}
+    TypedView(EntityManager *manager, ComponentMask mask) : BaseView<All>(manager, mask) {}
+  };
+
+  template <typename ... Components> using View = TypedView<false, Components...>;
   typedef BaseView<true> DebugView;
 
   template <typename ... Components>
   class UnpackingView {
    public:
     struct Unpacker {
-      Unpacker(ComponentHandle<Components> & ... handles) :
+      explicit Unpacker(ComponentHandle<Components> & ... handles) :
           handles(std::tuple<ComponentHandle<Components> & ...>(handles...)) {}
 
       void unpack(entityx::Entity &entity) const {
         unpack_<0, Components...>(entity);
       }
+
 
     private:
       template <int N, typename C>
@@ -473,9 +523,9 @@ class EntityManager : entityx::help::NonCopyable {
 
 
     Iterator begin() { return Iterator(manager_, mask_, 0, unpacker_); }
-    Iterator end() { return Iterator(manager_, mask_, manager_->capacity(), unpacker_); }
+    Iterator end() { return Iterator(manager_, mask_, static_cast<uint32_t>(manager_->capacity()), unpacker_); }
     const Iterator begin() const { return Iterator(manager_, mask_, 0, unpacker_); }
-    const Iterator end() const { return Iterator(manager_, mask_, manager_->capacity(), unpacker_); }
+    const Iterator end() const { return Iterator(manager_, mask_, static_cast<uint32_t>(manager_->capacity()), unpacker_); }
 
 
    private:
@@ -502,7 +552,7 @@ class EntityManager : entityx::help::NonCopyable {
   /**
    * Return true if the given entity ID is still valid.
    */
-  bool valid(Entity::Id id) {
+  bool valid(Entity::Id id) const {
     return id.index() < entity_version_.size() && entity_version_[id.index()] == id.version();
   }
 
@@ -528,6 +578,24 @@ class EntityManager : entityx::help::NonCopyable {
   }
 
   /**
+   * Create a new Entity by copying another. Copy-constructs each component.
+   *
+   * Emits EntityCreatedEvent.
+   */
+  Entity create_from_copy(Entity original) {
+    assert(original.valid());
+    auto clone = create();
+    auto mask = original.component_mask();
+    for (size_t i = 0; i < component_helpers_.size(); i++) {
+      BaseComponentHelper *helper = component_helpers_[i];
+      if (helper && mask.test(i))
+        helper->copy_component_to(original, clone);
+    }
+    return clone;
+  }
+
+
+  /**
    * Destroy an existing Entity::Id and its associated Components.
    *
    * Emits EntityDestroyedEvent.
@@ -535,13 +603,13 @@ class EntityManager : entityx::help::NonCopyable {
   void destroy(Entity::Id entity) {
     assert_valid(entity);
     uint32_t index = entity.index();
-    auto mask = entity_component_mask_[entity.index()];
-    event_manager_.emit<EntityDestroyedEvent>(Entity(this, entity));
-    for (size_t i = 0; i < component_pools_.size(); i++) {
-      BasePool *pool = component_pools_[i];
-      if (pool && mask.test(i))
-        pool->destroy(index);
+    auto mask = entity_component_mask_[index];
+    for (size_t i = 0; i < component_helpers_.size(); i++) {
+      BaseComponentHelper *helper = component_helpers_[i];
+      if (helper && mask.test(i))
+        helper->remove_component(Entity(this, entity));
     }
+    event_manager_.emit<EntityDestroyedEvent>(Entity(this, entity));
     entity_component_mask_[index].reset();
     entity_version_[index]++;
     free_list_.push_back(index);
@@ -572,12 +640,12 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C, typename ... Args>
   ComponentHandle<C> assign(Entity::Id id, Args && ... args) {
     assert_valid(id);
-    const BaseComponent::Family family = Component<C>::family();
+    const BaseComponent::Family family = component_family<C>();
     assert(!entity_component_mask_[id.index()].test(family));
 
     // Placement new into the component pool.
     Pool<C> *pool = accomodate_component<C>();
-    new(pool->get(id.index())) C(std::forward<Args>(args) ...);
+    ::new(pool->get(id.index())) C(std::forward<Args>(args) ...);
 
     // Set the bit for this component.
     entity_component_mask_[id.index()].set(family);
@@ -596,7 +664,7 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C>
   void remove(Entity::Id id) {
     assert_valid(id);
-    const BaseComponent::Family family = Component<C>::family();
+    const BaseComponent::Family family = component_family<C>();
     const uint32_t index = id.index();
 
     // Find the pool for this component family.
@@ -617,7 +685,7 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C>
   bool has_component(Entity::Id id) const {
     assert_valid(id);
-    size_t family = Component<C>::family();
+    size_t family = component_family<C>();
     // We don't bother checking the component mask, as we return a nullptr anyway.
     if (family >= component_pools_.size())
       return false;
@@ -632,10 +700,10 @@ class EntityManager : entityx::help::NonCopyable {
    *
    * @returns Pointer to an instance of C, or nullptr if the Entity::Id does not have that Component.
    */
-  template <typename C>
+  template <typename C, typename = typename std::enable_if<!std::is_const<C>::value>::type>
   ComponentHandle<C> component(Entity::Id id) {
     assert_valid(id);
-    size_t family = Component<C>::family();
+    size_t family = component_family<C>();
     // We don't bother checking the component mask, as we return a nullptr anyway.
     if (family >= component_pools_.size())
       return ComponentHandle<C>();
@@ -650,17 +718,17 @@ class EntityManager : entityx::help::NonCopyable {
    *
    * @returns Component instance, or nullptr if the Entity::Id does not have that Component.
    */
-  template <typename C>
-  const ComponentHandle<const C> component(Entity::Id id) const {
+  template <typename C, typename = typename std::enable_if<std::is_const<C>::value>::type>
+  const ComponentHandle<C, const EntityManager> component(Entity::Id id) const {
     assert_valid(id);
-    size_t family = Component<C>::family();
+    size_t family = component_family<C>();
     // We don't bother checking the component mask, as we return a nullptr anyway.
     if (family >= component_pools_.size())
-      return ComponentHandle<const C>();
+      return ComponentHandle<C, const EntityManager>();
     BasePool *pool = component_pools_[family];
     if (!pool || !entity_component_mask_[id.index()][family])
-      return ComponentHandle<const C>();
-    return ComponentHandle<const C>(this, id);
+      return ComponentHandle<C, const EntityManager>();
+    return ComponentHandle<C, const EntityManager>(this, id);
   }
 
   template <typename ... Components>
@@ -669,7 +737,7 @@ class EntityManager : entityx::help::NonCopyable {
   }
 
   template <typename ... Components>
-  std::tuple<ComponentHandle<const Components>...> components(Entity::Id id) const {
+  std::tuple<ComponentHandle<const Components, const EntityManager>...> components(Entity::Id id) const {
     return std::make_tuple(component<const Components>(id)...);
   }
 
@@ -686,9 +754,16 @@ class EntityManager : entityx::help::NonCopyable {
    * @endcode
    */
   template <typename ... Components>
-  View entities_with_components() {
+  View<Components...> entities_with_components() {
     auto mask = component_mask<Components ...>();
-    return View(this, mask);
+    return View<Components...>(this, mask);
+  }
+
+  template <typename T> struct identity { typedef T type; };
+
+  template <typename ... Components>
+  void each(typename identity<std::function<void(Entity entity, Components&...)>>::type f) {
+    return entities_with_components<Components...>().each(f);
   }
 
   /**
@@ -751,10 +826,17 @@ class EntityManager : entityx::help::NonCopyable {
    */
   void reset();
 
+  // Retrieve the component family for a type.
+  template <typename C>
+  static BaseComponent::Family component_family() {
+    return Component<typename std::remove_const<C>::type>::family();
+  }
+
  private:
   friend class Entity;
-  template <typename C>
+  template <typename C, typename EM>
   friend class ComponentHandle;
+
 
   inline void assert_valid(Entity::Id id) const {
     assert(id.index() < entity_component_mask_.size() && "Entity::Id ID outside entity vector range");
@@ -764,7 +846,7 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C>
   C *get_component_ptr(Entity::Id id) {
     assert(valid(id));
-    BasePool *pool = component_pools_[Component<C>::family()];
+    BasePool *pool = component_pools_[component_family<C>()];
     assert(pool);
     return static_cast<C*>(pool->get(id.index()));
   }
@@ -772,7 +854,7 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C>
   const C *get_component_ptr(Entity::Id id) const {
     assert_valid(id);
-    BasePool *pool = component_pools_[Component<C>::family()];
+    BasePool *pool = component_pools_[component_family<C>()];
     assert(pool);
     return static_cast<const C*>(pool->get(id.index()));
   }
@@ -785,7 +867,7 @@ class EntityManager : entityx::help::NonCopyable {
   template <typename C>
   ComponentMask component_mask() {
     ComponentMask mask;
-    mask.set(Component<C>::family());
+    mask.set(component_family<C>());
     return mask;
   }
 
@@ -815,7 +897,7 @@ class EntityManager : entityx::help::NonCopyable {
 
   template <typename C>
   Pool<C> *accomodate_component() {
-    BaseComponent::Family family = Component<C>::family();
+    BaseComponent::Family family = component_family<C>();
     if (component_pools_.size() <= family) {
       component_pools_.resize(family + 1, nullptr);
     }
@@ -823,6 +905,13 @@ class EntityManager : entityx::help::NonCopyable {
       Pool<C> *pool = new Pool<C>();
       pool->expand(index_counter_);
       component_pools_[family] = pool;
+    }
+    if (component_helpers_.size() <= family) {
+      component_helpers_.resize(family + 1, nullptr);
+    }
+    if (!component_helpers_[family]) {
+      ComponentHelper<C> *helper = new ComponentHelper<C>();
+      component_helpers_[family] = helper;
     }
     return static_cast<Pool<C>*>(component_pools_[family]);
   }
@@ -834,6 +923,9 @@ class EntityManager : entityx::help::NonCopyable {
   // Each element in component_pools_ corresponds to a Pool for a Component.
   // The index into the vector is the Component::family().
   std::vector<BasePool*> component_pools_;
+  // Each element in component_helpers_ corresponds to a ComponentHelper for a Component type.
+  // The index into the vector is the Component::family().
+  std::vector<BaseComponentHelper*> component_helpers_;
   // Bitmask of components associated with each entity. Index into the vector is the Entity::Id.
   std::vector<ComponentMask> entity_component_mask_;
   // Vector of entity version numbers. Incremented each time an entity is destroyed
@@ -869,8 +961,7 @@ ComponentHandle<C> Entity::replace(Args && ... args) {
   auto handle = component<C>();
   if (handle) {
     *(handle.get()) = C(std::forward<Args>(args) ...);
-  }
-  else {
+  } else {
     handle = manager_->assign<C>(id_, std::forward<Args>(args) ...);
   }
   return handle;
@@ -882,16 +973,16 @@ void Entity::remove() {
   manager_->remove<C>(id_);
 }
 
-template <typename C>
+template <typename C, typename>
 ComponentHandle<C> Entity::component() {
   assert(valid());
   return manager_->component<C>(id_);
 }
 
-template <typename C>
-const ComponentHandle<const C> Entity::component() const {
+  template <typename C, typename>
+const ComponentHandle<C, const EntityManager> Entity::component() const {
   assert(valid());
-  return manager_->component<const C>(id_);
+  return const_cast<const EntityManager*>(manager_)->component<const C>(id_);
 }
 
 template <typename ... Components>
@@ -901,9 +992,9 @@ std::tuple<ComponentHandle<Components>...> Entity::components() {
 }
 
 template <typename ... Components>
-std::tuple<ComponentHandle<const Components>...> Entity::components() const {
+std::tuple<ComponentHandle<const Components, const EntityManager>...> Entity::components() const {
   assert(valid());
-  return manager_->components<const Components...>(id_);
+  return const_cast<const EntityManager*>(manager_)->components<const Components...>(id_);
 }
 
 
@@ -935,45 +1026,79 @@ inline std::ostream &operator << (std::ostream &out, const Entity &entity) {
 }
 
 
-template <typename C>
-inline ComponentHandle<C>::operator bool() const {
+template <typename C, typename EM>
+inline ComponentHandle<C, EM>::operator bool() const {
   return valid();
 }
 
-template <typename C>
-inline bool ComponentHandle<C>::valid() const {
-  return manager_ && manager_->valid(id_) && manager_->has_component<C>(id_);
+template <typename C, typename EM>
+inline bool ComponentHandle<C, EM>::valid() const {
+  return manager_ && manager_->valid(id_) && manager_->template has_component<C>(id_);
 }
 
-template <typename C>
-inline C *ComponentHandle<C>::operator -> () {
+template <typename C, typename EM>
+inline C *ComponentHandle<C, EM>::operator -> () {
   assert(valid());
-  return manager_->get_component_ptr<C>(id_);
+  return manager_->template get_component_ptr<C>(id_);
 }
 
-template <typename C>
-inline const C *ComponentHandle<C>::operator -> () const {
+template <typename C, typename EM>
+inline const C *ComponentHandle<C, EM>::operator -> () const {
   assert(valid());
-  return manager_->get_component_ptr<C>(id_);
+  return manager_->template get_component_ptr<C>(id_);
 }
 
-template <typename C>
-inline C *ComponentHandle<C>::get() {
+template <typename C, typename EM>
+inline C &ComponentHandle<C, EM>::operator * () {
   assert(valid());
-  return manager_->get_component_ptr<C>(id_);
+  return *manager_->template get_component_ptr<C>(id_);
 }
 
-template <typename C>
-inline const C *ComponentHandle<C>::get() const {
+template <typename C, typename EM>
+inline const C &ComponentHandle<C, EM>::operator * () const {
   assert(valid());
-  return manager_->get_component_ptr<C>(id_);
+  return *manager_->template get_component_ptr<C>(id_);
 }
 
-template <typename C>
-inline void ComponentHandle<C>::remove() {
+template <typename C, typename EM>
+inline C *ComponentHandle<C, EM>::get() {
   assert(valid());
-  manager_->remove<C>(id_);
+  return manager_->template get_component_ptr<C>(id_);
+}
+
+template <typename C, typename EM>
+inline const C *ComponentHandle<C, EM>::get() const {
+  assert(valid());
+  return manager_->template get_component_ptr<C>(id_);
+}
+
+template <typename C, typename EM>
+inline void ComponentHandle<C, EM>::remove() {
+  assert(valid());
+  manager_->template remove<C>(id_);
+}
+
+template <typename C, typename EM>
+inline Entity ComponentHandle<C, EM>::entity() {
+  assert(valid());
+  return manager_->get(id_);
 }
 
 
 }  // namespace entityx
+
+
+namespace std {
+template <> struct hash<entityx::Entity> {
+  std::size_t operator () (const entityx::Entity &entity) const {
+    return static_cast<std::size_t>(entity.id().index() ^ entity.id().version());
+  }
+};
+
+template <> struct hash<const entityx::Entity> {
+  std::size_t operator () (const entityx::Entity &entity) const {
+    return static_cast<std::size_t>(entity.id().index() ^ entity.id().version());
+  }
+};
+}
+
